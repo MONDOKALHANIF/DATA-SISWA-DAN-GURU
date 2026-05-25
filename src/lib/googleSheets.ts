@@ -1,11 +1,84 @@
 import { initializeApp } from "firebase/app";
 import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User } from "firebase/auth";
+import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
 import firebaseConfig from "../../firebase-applet-config.json";
 import { Kelas, MataPelajaran, Siswa, KategoriPenilaian, Penilaian, GuruCode, Jadwal, HariBelajar, Tugas, AbsenSiswa, AbsenGuru, Announcement, UjianPraktek, PengumpulanTugas, GuruPiket, TeacherAgenda } from "../types";
 
-// Initialize Firebase App and Auth
+// Initialize Firebase App, Auth, and Firestore
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId || undefined);
+
+/**
+ * Fetches the Spreadsheet ID for the signed-in user from Firestore
+ */
+export async function fetchUserSpreadsheetId(userId: string): Promise<string | null> {
+  try {
+    const docRef = doc(db, "userConfigs", userId);
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      return data.spreadsheetId || null;
+    }
+  } catch (err) {
+    console.error("Gagal mengambil konfigurasi Spreadsheet ID dari Cloud:", err);
+  }
+  return null;
+}
+
+/**
+ * Saves the User's Spreadsheet ID to Firestore for cross-device syncing
+ */
+export async function syncUserSpreadsheetId(userId: string, email: string, sheetId: string) {
+  try {
+    const docRef = doc(db, "userConfigs", userId);
+    await setDoc(docRef, {
+      userId,
+      userEmail: email,
+      spreadsheetId: sheetId,
+      isAutoSyncEnabled: true,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+    console.log("Konfigurasi Spreadsheet ID berhasil disinkronkan ke Cloud!");
+  } catch (err) {
+    console.error("Gagal menyinkronkan Spreadsheet ID ke Cloud:", err);
+  }
+}
+
+/**
+ * Saves all school academic state into Cloud Firestore under academicData collection for the logged-in user
+ */
+export async function syncAcademicDataToFirestore(userId: string, payload: any) {
+  try {
+    const docRef = doc(db, "academicData", userId);
+    await setDoc(docRef, {
+      userId,
+      updatedAt: new Date().toISOString(),
+      schemaVersion: 1,
+      payload
+    }, { merge: true });
+    console.log("Database Sekolah berhasil dicadangkan ke Google Cloud Firestore!");
+  } catch (err) {
+    console.error("Gagal menyinkronkan Database Sekolah ke Firestore:", err);
+  }
+}
+
+/**
+ * Loads school academic state from Cloud Firestore if available
+ */
+export async function fetchAcademicDataFromFirestore(userId: string): Promise<any | null> {
+  try {
+    const docRef = doc(db, "academicData", userId);
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      return data.payload || null;
+    }
+  } catch (err) {
+    console.error("Gagal mengambil Database Sekolah dari Firestore:", err);
+  }
+  return null;
+}
 
 const provider = new GoogleAuthProvider();
 // Request Sheets scope for full read-write access to spreadsheets
@@ -94,6 +167,7 @@ export function setSpreadsheetId(id: string) {
 
 // Define sheets and their headers
 export const REQUIRED_SHEETS = [
+  { title: "1. Petunjuk Penggunaan", headers: ["PETUNJUK PENGISIAN TEMPLATE DATA SISWADIGITAL"] },
   { title: "2. Kelas", headers: ["id", "namaKelas", "deskripsi"] },
   { title: "3. Mata Pelajaran", headers: ["id", "namaMapel"] },
   { title: "4. Siswa", headers: ["id", "nis", "namaSiswa", "kelasId", "namaWali", "noHpWali", "alamatSiswa"] },
@@ -115,6 +189,34 @@ export const REQUIRED_SHEETS = [
  * Ensures REQUIRED_SHEETS tabs exist in the targeted Google Spreadsheet.
  * If some tabs are missing, it bootstraps their creation.
  */
+export async function createGoogleSpreadsheet(accessToken: string, title: string = "SiswaDigital_SDIT_AlHanif"): Promise<string> {
+  try {
+    const resp = await fetch(`https://sheets.googleapis.com/v4/spreadsheets`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        properties: {
+          title: title
+        }
+      })
+    });
+    
+    if (!resp.ok) {
+      const errPayload = await resp.json().catch(() => ({}));
+      throw new Error(`Gagal membuat Spreadsheet Baru (${resp.status}): ${errPayload?.error?.message || "Izin tidak memadai"}`);
+    }
+    
+    const data = await resp.json();
+    return data.spreadsheetId;
+  } catch (err: any) {
+    console.error("createGoogleSpreadsheet failed:", err);
+    throw err;
+  }
+}
+
 export async function ensureSpreadsheetTabs(accessToken: string): Promise<string[]> {
   try {
     // 1. Fetch current sheets metadata
@@ -224,6 +326,24 @@ export async function exportLocalDataToGoogleSheets(
 
   const getRowsForSheet = (sheetTitle: string): any[][] => {
     switch (sheetTitle) {
+      case "1. Petunjuk Penggunaan":
+        return [
+          ["1. Jangan mengubah nama/susunan kolom pada baris pertama di setiap sheet."],
+          ["2. Setiap sheet saling berhubungan menggunakan Kode ID."],
+          ["   - Sheet 'Siswa' merujuk ke 'ID Kelas' yang ada di sheet 'Kelas'."],
+          ["   - Sheet 'Kategori Tugas' merujuk ke 'ID Kelas' dan 'ID Mapel'."],
+          ["   - Sheet 'Nilai Siswa' merujuk ke 'ID Kategori' dan 'NIS' siswa."],
+          ["3. Format ID:"],
+          ["   - ID Kelas: K001, K002 (K diikuti 3 angka)"],
+          ["   - ID Mapel: M001, M002 (M diikuti 3 angka)"],
+          ["   - ID Kategori Tugas: KT001, KT002 (KT diikuti 3 angka)"],
+          ["   - NIS Siswa: Angka unik (contoh: 240101)"],
+          ["4. Format Tanggal pada sheet Nilai Siswa harus YYYY-MM-DD (Contoh: 2026-05-22)."],
+          ["5. Nilai harus berupa angka di rentang 0 sampai 100."],
+          [""],
+          ["Unduh template ini, isi dengan data Anda, lalu unggah kembali melalui sistem."],
+          ["Database ini dicadangkan secara otomatis dan tersinkronisasi secara langsung."]
+        ];
       case "2. Kelas":
         return data.kelas.map(k => [k.id, k.namaKelas, k.deskripsi || ""]);
       case "3. Mata Pelajaran":

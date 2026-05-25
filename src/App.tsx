@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { 
   LayoutDashboard, 
   GraduationCap, 
@@ -29,7 +29,18 @@ import {
 } from "lucide-react";
 
 import { Kelas, MataPelajaran, Siswa, KategoriPenilaian, Penilaian, GuruCode, AbsenSiswa, AbsenGuru, Jadwal, Announcement, Tugas, PengumpulanTugas, UjianPraktek, GuruPiket, TeacherAgenda } from "./types";
-import { initAuth, importDataFromGoogleSheets } from "./lib/googleSheets";
+import { 
+  initAuth, 
+  importDataFromGoogleSheets, 
+  fetchUserSpreadsheetId, 
+  setSpreadsheetId, 
+  syncUserSpreadsheetId, 
+  exportLocalDataToGoogleSheets,
+  SPREADSHEET_ID,
+  fetchAcademicDataFromFirestore,
+  syncAcademicDataToFirestore,
+  createGoogleSpreadsheet
+} from "./lib/googleSheets";
 import HomeworkPortal from "./components/HomeworkPortal";
 import { 
   INITIAL_KELAS, 
@@ -1086,6 +1097,11 @@ export default function App() {
   const [gsLaunchSyncError, setGsLaunchSyncError] = useState<string | null>(null);
   const [gsLaunchSyncSuccess, setGsLaunchSyncSuccess] = useState<boolean>(false);
 
+  // Real-time Cloud Auto-Sync engine states
+  const [isAutoSyncEnabled, setIsAutoSyncEnabled] = useState(() => localStorage.getItem("PSD_AUTO_SYNC_ENABLED") !== "false");
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
+
   useEffect(() => {
     const unsubscribe = initAuth(
       async (user, token) => {
@@ -1094,16 +1110,93 @@ export default function App() {
         setIsGSheetsSyncingOnLaunch(true);
         setGsLaunchSyncError(null);
         try {
-          // Auto-pull/sync upon launch/refresh
-          const data = await importDataFromGoogleSheets(token);
-          if (data) {
-            if (data.kelas && data.kelas.length > 0) setKelas(data.kelas);
-            if (data.mapel && data.mapel.length > 0) setMapel(data.mapel);
-            if (data.siswa && data.siswa.length > 0) setSiswa(data.siswa);
-            if (data.kategori && data.kategori.length > 0) setKategori(data.kategori);
-            if (data.penilaian) setPenilaian(data.penilaian);
-            if (data.guru && data.guru.length > 0) setGuruCodes(data.guru);
-            if (data.jadwal && data.jadwal.length > 0) setJadwal(data.jadwal);
+          // 1. Fetch custom Spreadsheet ID from Firestore for cross-device sync!
+          const cloudSheetId = await fetchUserSpreadsheetId(user.uid);
+          if (cloudSheetId) {
+            setSpreadsheetId(cloudSheetId);
+          } else if (SPREADSHEET_ID) {
+            // Backup the current local spreadsheet id to cloud if not already synced
+            await syncUserSpreadsheetId(user.uid, user.email || "", SPREADSHEET_ID);
+          }
+
+          // 2. Fetch Academic State backup from Google Cloud Firestore
+          const cloudState = await fetchAcademicDataFromFirestore(user.uid);
+
+          // 3. Auto-pull/sync upon launch/refresh from Google Sheets
+          let data = null;
+          try {
+            data = await importDataFromGoogleSheets(token);
+          } catch (sheetsErr: any) {
+            console.warn("Gagal mengimpor data secara langsung dari Google Sheets, beralih ke cadangan Firestore...", sheetsErr);
+            const errMsg = String(sheetsErr.message || "");
+            if (errMsg.includes("403") || errMsg.includes("Gagal") || !cloudSheetId) {
+              console.log("Mendeteksi galat akses atau pengguna baru. Membuat spreadsheet pribadi berjalan otomatis...");
+              try {
+                const autoSheetId = await createGoogleSpreadsheet(token, `SiswaDigital_SDIT_AlHanif_Database`);
+                if (autoSheetId) {
+                  setSpreadsheetId(autoSheetId);
+                  await syncUserSpreadsheetId(user.uid, user.email || "", autoSheetId);
+                  // Push current cloudState or default empty structure to the newly created spreadsheet
+                  const fallbackData = cloudState || {
+                    kelas, mapel, siswa, kategori, penilaian,
+                    guru: guruCodes, jadwal, tugas, absenSiswa, absenGuru,
+                    announcements, ujianPraktek, pengumpulanTugas, guruPiket, agendas
+                  };
+                  await exportLocalDataToGoogleSheets(token, {
+                    kelas: fallbackData.kelas || [],
+                    mapel: fallbackData.mapel || [],
+                    siswa: fallbackData.siswa || [],
+                    kategori: fallbackData.kategori || [],
+                    penilaian: fallbackData.penilaian || [],
+                    guru: fallbackData.guru || fallbackData.guruCodes || [],
+                    jadwal: fallbackData.jadwal || [],
+                    tugas: fallbackData.tugas || [],
+                    absenSiswa: fallbackData.absenSiswa || [],
+                    absenGuru: fallbackData.absenGuru || [],
+                    announcements: fallbackData.announcements || [],
+                    ujianPraktek: fallbackData.ujianPraktek || [],
+                    pengumpulanTugas: fallbackData.pengumpulanTugas || [],
+                    guruPiket: fallbackData.guruPiket || [],
+                    agendas: fallbackData.agendas || []
+                  });
+                  data = await importDataFromGoogleSheets(token);
+                }
+              } catch (createErr) {
+                console.error("Gagal asisten cerdas pembuatan otomatis spreadsheet Google Anda:", createErr);
+              }
+            }
+          }
+
+          const finalData = data || cloudState;
+
+          if (finalData) {
+            if (finalData.kelas && finalData.kelas.length > 0) setKelas(finalData.kelas);
+            if (finalData.mapel && finalData.mapel.length > 0) setMapel(finalData.mapel);
+            if (finalData.siswa && finalData.siswa.length > 0) setSiswa(finalData.siswa);
+            if (finalData.kategori && finalData.kategori.length > 0) setKategori(finalData.kategori);
+            if (finalData.penilaian) setPenilaian(finalData.penilaian);
+            
+            // Backup other local entities to state
+            const loadedGuru = finalData.guru || finalData.guruCodes;
+            if (loadedGuru && loadedGuru.length > 0) setGuruCodes(loadedGuru);
+            if (finalData.jadwal && finalData.jadwal.length > 0) setJadwal(finalData.jadwal);
+            if (finalData.tugas && finalData.tugas.length > 0) setTugas(finalData.tugas);
+            if (finalData.absenSiswa && finalData.absenSiswa.length > 0) setAbsenSiswa(finalData.absenSiswa);
+            if (finalData.absenGuru && finalData.absenGuru.length > 0) setAbsenGuru(finalData.absenGuru);
+            if (finalData.announcements && finalData.announcements.length > 0) setAnnouncements(finalData.announcements);
+            if (finalData.ujianPraktek && finalData.ujianPraktek.length > 0) setUjianPraktek(finalData.ujianPraktek);
+            if (finalData.pengumpulanTugas && finalData.pengumpulanTugas.length > 0) setPengumpulanTugas(finalData.pengumpulanTugas);
+            if (finalData.guruPiket && finalData.guruPiket.length > 0) setGuruPiket(finalData.guruPiket);
+            if (finalData.agendas && finalData.agendas.length > 0) setAgendas(finalData.agendas);
+
+            setGsLaunchSyncSuccess(true);
+          } else {
+            console.log("Pengguna baru terdeteksi dengan state kosong, menyimpan data lokal saat ini ke Cloud.");
+            await syncAcademicDataToFirestore(user.uid, {
+              kelas, mapel, siswa, kategori, penilaian,
+              guru: guruCodes, jadwal, tugas, absenSiswa, absenGuru,
+              announcements, ujianPraktek, pengumpulanTugas, guruPiket, agendas
+            });
             setGsLaunchSyncSuccess(true);
           }
         } catch (err: any) {
@@ -1256,6 +1349,131 @@ export default function App() {
       localStorage.removeItem("PSD_CURRENT_GURU_CODE");
     }
   }, [currentGuruCode]);
+
+  // Save auto-sync switch value to local storage
+  useEffect(() => {
+    localStorage.setItem("PSD_AUTO_SYNC_ENABLED", String(isAutoSyncEnabled));
+  }, [isAutoSyncEnabled]);
+
+  // Keep a ref to verify if initial data import on launch has completed
+  const hasFinishedInitialPull = useRef(false);
+
+  useEffect(() => {
+    if (!isGSheetsSyncingOnLaunch) {
+      const t = setTimeout(() => {
+        hasFinishedInitialPull.current = true;
+      }, 2000);
+      return () => clearTimeout(t);
+    } else {
+      hasFinishedInitialPull.current = false;
+    }
+  }, [isGSheetsSyncingOnLaunch]);
+
+  // Real-time automatic background synchronization to Google Sheets and Cloud Firestore
+  useEffect(() => {
+    if (!hasFinishedInitialPull.current) return;
+    if (!googleUser) return;
+    if (!isAutoSyncEnabled) return;
+
+    setCloudSyncStatus("saving");
+    setCloudSyncError(null);
+
+    const timer = setTimeout(async () => {
+      try {
+        // 1. Sync to Google Sheets if access token is available
+        if (googleAccessToken) {
+          try {
+            await exportLocalDataToGoogleSheets(googleAccessToken, {
+              kelas,
+              mapel,
+              siswa,
+              kategori,
+              penilaian,
+              guru: guruCodes,
+              jadwal,
+              tugas,
+              absenSiswa,
+              absenGuru,
+              announcements,
+              ujianPraktek,
+              pengumpulanTugas,
+              guruPiket,
+              agendas
+            });
+          } catch (sheetsErr: any) {
+            console.error("Auto-sync background ke Google Sheets gagal, beralih ke cadangan Firestore:", sheetsErr);
+            const errMsg = String(sheetsErr.message || "");
+            if (errMsg.includes("403")) {
+              const cloudSheetId = await fetchUserSpreadsheetId(googleUser.uid);
+              if (!cloudSheetId || SPREADSHEET_ID === "1fKIvJVpQ1XxTbj-eNTayRBbvMiHOYstrf3N3Lm18KcI") {
+                console.log("Membuat spreadsheet pribadi otomatis dari background sync...");
+                try {
+                  const autoSheetId = await createGoogleSpreadsheet(googleAccessToken, `SiswaDigital_SDIT_AlHanif_Database`);
+                  if (autoSheetId) {
+                    setSpreadsheetId(autoSheetId);
+                    await syncUserSpreadsheetId(googleUser.uid, googleUser.email || "", autoSheetId);
+                    await exportLocalDataToGoogleSheets(googleAccessToken, {
+                      kelas, mapel, siswa, kategori, penilaian, guru: guruCodes, jadwal, tugas, absenSiswa, absenGuru, announcements, ujianPraktek, pengumpulanTugas, guruPiket, agendas
+                    });
+                  }
+                } catch (createErr) {
+                  console.error("Gagal asisten otomatis pembuatan spreadsheet:", createErr);
+                }
+              }
+            }
+          }
+        }
+
+        // 2. Sync to Cloud Firestore (Google Database Account) for ultimate device-switch redundancy
+        await syncAcademicDataToFirestore(googleUser.uid, {
+          kelas,
+          mapel,
+          siswa,
+          kategori,
+          penilaian,
+          guru: guruCodes,
+          jadwal,
+          tugas,
+          absenSiswa,
+          absenGuru,
+          announcements,
+          ujianPraktek,
+          pengumpulanTugas,
+          guruPiket,
+          agendas
+        });
+
+        setCloudSyncStatus("saved");
+        setCloudSyncError(null);
+        setTimeout(() => setCloudSyncStatus("idle"), 4000);
+      } catch (err: any) {
+        console.error("Auto-sync background gagal:", err);
+        setCloudSyncStatus("error");
+        setCloudSyncError(err.message || "Koneksi Google/Firestore terputus.");
+      }
+    }, 4005); // 4 seconds debounce to bundle edits together
+
+    return () => clearTimeout(timer);
+  }, [
+    kelas,
+    mapel,
+    siswa,
+    kategori,
+    penilaian,
+    guruCodes,
+    jadwal,
+    tugas,
+    absenSiswa,
+    absenGuru,
+    announcements,
+    ujianPraktek,
+    pengumpulanTugas,
+    guruPiket,
+    agendas,
+    googleUser,
+    googleAccessToken,
+    isAutoSyncEnabled
+  ]);
 
   // State to handle automatic timed-dismissal of welcome banners
   const [showWelcomeBanners, setShowWelcomeBanners] = useState(true);
@@ -1815,7 +2033,7 @@ export default function App() {
     { id: "pengumuman", label: "Papan Pengumuman", icon: Megaphone, color: "text-amber-500" },
     { id: "ekstra", label: "Acara & Kegiatan Ekstra", icon: Award, color: "text-emerald-500" },
     { id: "laporan", label: "Laporan & Rapor", icon: FileText, color: "text-blue-500" },
-    { id: "excel", label: "Impor Excel", icon: FileSpreadsheet, color: "text-emerald-600" }
+    { id: "excel", label: "Cloud Sync & Backup", icon: FileSpreadsheet, color: "text-emerald-600" }
   ];
 
   return (
@@ -1890,31 +2108,38 @@ export default function App() {
             {isFullscreen ? <Minimize2 className="w-3.5 h-3.5 font-bold" /> : <Maximize2 className="w-3.5 h-3.5 font-bold" />}
             <span className="hidden sm:inline">{isFullscreen ? "Layar Normal" : "Layar Penuh"}</span>
           </button>
+          
           {/* Connection Status Badge to Google Sheets */}
           {googleAccessToken ? (
             <div 
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-sans text-[11px] font-black border ${
-                isGSheetsSyncingOnLaunch 
+                isGSheetsSyncingOnLaunch || cloudSyncStatus === "saving"
                   ? "bg-amber-50 border-amber-200 text-amber-700 animate-pulse" 
-                  : gsLaunchSyncError 
-                    ? "bg-rose-50 border-rose-205 text-rose-700" 
-                    : "bg-emerald-50 border-emerald-200 text-emerald-800"
+                  : gsLaunchSyncError || cloudSyncStatus === "error"
+                    ? "bg-rose-50 border-rose-205 text-rose-700 animate-shake" 
+                    : cloudSyncStatus === "saved"
+                      ? "bg-teal-50 border-teal-200 text-teal-800"
+                      : "bg-emerald-50 border-emerald-200 text-emerald-800"
               }`}
               title={
-                isGSheetsSyncingOnLaunch 
+                isGSheetsSyncingOnLaunch || cloudSyncStatus === "saving"
                   ? "Sedang menyinkronkan data Google Spreadsheet..." 
-                  : gsLaunchSyncError 
-                    ? `Gagal Sinkronisasi: ${gsLaunchSyncError}` 
+                  : gsLaunchSyncError || cloudSyncStatus === "error"
+                    ? `Gagal Sinkronisasi: ${gsLaunchSyncError || cloudSyncError}` 
                     : "Terkoneksi Sempurna dengan Google Spreadsheet"
               }
             >
-              <div className={`w-2 h-2 rounded-full ${isGSheetsSyncingOnLaunch ? 'bg-amber-400 animate-ping' : gsLaunchSyncError ? 'bg-rose-500' : 'bg-emerald-500'}`} />
+              <div className={`w-2 h-2 rounded-full ${isGSheetsSyncingOnLaunch || cloudSyncStatus === "saving" ? 'bg-amber-400 animate-ping' : gsLaunchSyncError || cloudSyncStatus === "error" ? 'bg-rose-500' : 'bg-emerald-500'}`} />
               <span className="hidden sm:inline">
                 {isGSheetsSyncingOnLaunch 
                   ? "Menyinkronkan..." 
-                  : gsLaunchSyncError 
-                    ? "GSheets Error" 
-                    : "Spreadsheet Aktif"}
+                  : cloudSyncStatus === "saving"
+                    ? "Menyimpan ke Awan..."
+                    : cloudSyncStatus === "saved"
+                      ? "Tersimpan Online"
+                      : gsLaunchSyncError 
+                        ? "GSheets Error" 
+                        : "Cloud Sinkron: Aktif"}
               </span>
               <span className="sm:hidden font-extrabold">Spreadsheet: OK</span>
             </div>
@@ -2666,6 +2891,8 @@ export default function App() {
                     guruPiket={guruPiket}
                     agendas={agendas}
                     userRole={userRole || "guru"}
+                    isAutoSyncEnabled={isAutoSyncEnabled}
+                    setIsAutoSyncEnabled={setIsAutoSyncEnabled}
                     onImportAllData={handleImportAllData}
                   />
                 )}
