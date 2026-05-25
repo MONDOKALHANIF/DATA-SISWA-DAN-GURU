@@ -1,0 +1,8 @@
+{
+  "name": "SiswaDigital SDIT Al Hanif Cilegon",
+  "description": "Sistem informasi pengelolaan akademik terpadu ramah wali murid untuk memantau nilai seluruh mata pelajaran secara real-time.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
