@@ -18,6 +18,7 @@ import {
   Lock,
   Home,
   ArrowRight,
+  ArrowLeft,
   Shield,
   DoorOpen,
   Megaphone,
@@ -39,7 +40,9 @@ import {
   SPREADSHEET_ID,
   fetchAcademicDataFromFirestore,
   syncAcademicDataToFirestore,
-  createGoogleSpreadsheet
+  createGoogleSpreadsheet,
+  emailAndPasswordSignIn,
+  emailAndPasswordSignUp
 } from "./lib/googleSheets";
 import HomeworkPortal from "./components/HomeworkPortal";
 import { 
@@ -767,6 +770,12 @@ export default function App() {
   });
 
   const [verificationInput, setVerificationInput] = useState("");
+  const [authMethod, setAuthMethod] = useState<"email" | "code">("email");
+  const [emailInput, setEmailInput] = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
+  const [displayNameInput, setDisplayNameInput] = useState("");
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
 
   // Visual Theme Engine states
   const [isThemeModalOpen, setIsThemeModalOpen] = useState(false);
@@ -957,6 +966,146 @@ export default function App() {
 
   const activeGuruProfile = guruCodes.find(g => g.code === currentGuruCode && g.isActive);
 
+  const handleEmailPasswordAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!emailInput.trim() || !passwordInput.trim()) {
+      showToast("Email dan Kata Sandi wajib diisi!", "neutral");
+      return;
+    }
+    setAuthLoading(true);
+    try {
+      if (isSignUp) {
+        // Sign-Up Flow
+        const user = await emailAndPasswordSignUp(emailInput.trim(), passwordInput.trim(), displayNameInput.trim());
+        setGoogleUser(user);
+        showToast("Registrasi sukses! Selamat datang.", "success");
+        
+        // Auto-detect role
+        const lowerEmail = emailInput.toLowerCase();
+        if (lowerEmail === "documenmondok003@gmail.com" || lowerEmail.includes("admin")) {
+          setIsAdminUnlocked(true);
+          localStorage.setItem("PSD_ADMIN_UNLOCKED", "true");
+          setUserRole("admin");
+          localStorage.setItem("PSD_USER_ROLE", "admin");
+        } else {
+          // If they entered a matching guru code on signup, associate it!
+          const codeVal = verificationInput.trim().toUpperCase();
+          const matched = codeVal ? guruCodes.find(g => g.code.toUpperCase() === codeVal && g.isActive) : undefined;
+          
+          if (matched) {
+            setGuruCodes(prev => prev.map(g => g.code === matched.code ? { ...g, email: lowerEmail } : g));
+            setCurrentGuruCode(matched.code);
+            localStorage.setItem("PSD_CURRENT_GURU_CODE", matched.code);
+            setUserRole("guru");
+            localStorage.setItem("PSD_USER_ROLE", "guru");
+            showToast(`Akun Anda terhubung dengan profil ${matched.namaGuru}`, "success");
+          } else {
+            // Since no other verification code is required, automatically spawn a clean teacher profile
+            const generatedCode = "GURU-" + Math.floor(1000 + Math.random() * 9000);
+            const friendlyName = displayNameInput.trim() || emailInput.split("@")[0].replace(/[._-]/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+            const newGuru: GuruCode = {
+              code: generatedCode,
+              namaGuru: friendlyName,
+              assignedKelasId: "K001",
+              createdAt: new Date().toISOString().split("T")[0],
+              isActive: true,
+              phoneNumber: "",
+              email: lowerEmail
+            };
+            setGuruCodes(prev => [...prev, newGuru]);
+            setCurrentGuruCode(generatedCode);
+            localStorage.setItem("PSD_CURRENT_GURU_CODE", generatedCode);
+            setUserRole("guru");
+            localStorage.setItem("PSD_USER_ROLE", "guru");
+            showToast(`Akun Baru Guru disiapkan: ${friendlyName}`, "success");
+          }
+        }
+      } else {
+        // Sign-In Flow
+        const user = await emailAndPasswordSignIn(emailInput.trim(), passwordInput.trim());
+        setGoogleUser(user);
+        showToast("Masuk berhasil!", "success");
+        
+        // Auto-detect role
+        const lowerEmail = emailInput.toLowerCase();
+        if (lowerEmail === "documenmondok003@gmail.com" || lowerEmail.includes("admin")) {
+          setIsAdminUnlocked(true);
+          localStorage.setItem("PSD_ADMIN_UNLOCKED", "true");
+          setUserRole("admin");
+          localStorage.setItem("PSD_USER_ROLE", "admin");
+        } else {
+          setUserRole("guru");
+          localStorage.setItem("PSD_USER_ROLE", "guru");
+
+          // Look up if any profile in guruCodes matches this login email
+          const existingGuruByEmail = guruCodes.find(g => g.email?.toLowerCase() === lowerEmail);
+          const savedCode = localStorage.getItem("PSD_CURRENT_GURU_CODE");
+
+          if (existingGuruByEmail) {
+            setCurrentGuruCode(existingGuruByEmail.code);
+            localStorage.setItem("PSD_CURRENT_GURU_CODE", existingGuruByEmail.code);
+            showToast(`Selamat datang kembali, ${existingGuruByEmail.namaGuru}!`, "success");
+          } else if (savedCode && guruCodes.some(g => g.code === savedCode)) {
+            setCurrentGuruCode(savedCode);
+            setGuruCodes(prev => prev.map(g => g.code === savedCode ? { ...g, email: lowerEmail } : g));
+            showToast("Masuk berhasil!", "success");
+          } else {
+            // Check if they typed a code in the verificationInput field
+            const codeVal = verificationInput.trim().toUpperCase();
+            const matched = codeVal ? guruCodes.find(g => g.code.toUpperCase() === codeVal && g.isActive) : undefined;
+
+            if (matched) {
+              setGuruCodes(prev => prev.map(g => g.code === matched.code ? { ...g, email: lowerEmail } : g));
+              setCurrentGuruCode(matched.code);
+              localStorage.setItem("PSD_CURRENT_GURU_CODE", matched.code);
+              showToast(`Akun terhubung dengan profil ${matched.namaGuru}!`, "success");
+            } else {
+              // Automatically spawn a clean teacher profile so they can enter immediately
+              const generatedCode = "GURU-" + Math.floor(1000 + Math.random() * 9000);
+              const friendlyName = user.displayName || emailInput.split("@")[0].replace(/[._-]/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+              const newGuru: GuruCode = {
+                code: generatedCode,
+                namaGuru: friendlyName,
+                assignedKelasId: "K001",
+                createdAt: new Date().toISOString().split("T")[0],
+                isActive: true,
+                phoneNumber: "",
+                email: lowerEmail
+              };
+              setGuruCodes(prev => [...prev, newGuru]);
+              setCurrentGuruCode(generatedCode);
+              localStorage.setItem("PSD_CURRENT_GURU_CODE", generatedCode);
+              showToast(`Selamat datang, ${friendlyName}! Profil Guru baru disiapkan.`, "success");
+            }
+          }
+        }
+      }
+      
+      // Clean up fields
+      setEmailInput("");
+      setPasswordInput("");
+      setDisplayNameInput("");
+      setVerificationInput("");
+    } catch (err: any) {
+      console.error(err);
+      let errMsg = "Terjadi kesalahan autentikasi.";
+      if (err.code === "auth/email-already-in-use") {
+        errMsg = "Alamat email ini sudah terdaftar.";
+      } else if (err.code === "auth/invalid-credential") {
+        errMsg = "Email atau sandi salah.";
+      } else if (err.code === "auth/weak-password") {
+        errMsg = "Kata sandi terlalu pendek (minimal 6 karakter).";
+      } else if (err.code === "auth/invalid-email") {
+        errMsg = "Format alamat email tidak valid.";
+      } else if (err.message) {
+        errMsg = err.message;
+      }
+      showToast(errMsg, "neutral");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
   // Core STATE load from LocalStorage with smart initials fallback
   const [kelas, setKelas] = useState<Kelas[]>(() => {
     const saved = localStorage.getItem("PSD_KELAS");
@@ -1107,6 +1256,58 @@ export default function App() {
       async (user, token) => {
         setGoogleUser(user);
         setGoogleAccessToken(token);
+
+        // Auto-configure user role and map Guru profile on refresh/auth detection
+        if (user.email) {
+          const lowerEmail = user.email.toLowerCase();
+          if (lowerEmail === "documenmondok003@gmail.com" || lowerEmail.includes("admin")) {
+            setIsAdminUnlocked(true);
+            localStorage.setItem("PSD_ADMIN_UNLOCKED", "true");
+            setUserRole("admin");
+            localStorage.setItem("PSD_USER_ROLE", "admin");
+          } else {
+            setUserRole("guru");
+            localStorage.setItem("PSD_USER_ROLE", "guru");
+            
+            // Look up existing profile or create one
+            const savedGuru = localStorage.getItem("PSD_GURU_CODES");
+            const listGuru: GuruCode[] = savedGuru ? JSON.parse(savedGuru) : [
+              { code: "USTADZ-01", namaGuru: "Ustadz Abdurrahman, S.Pd.I.", assignedKelasId: "K001", createdAt: "2026-05-18", isActive: true, phoneNumber: "628123456781" },
+              { code: "USTADZ-02", namaGuru: "Ustadzah Fatimah, S.Pd.", assignedKelasId: "K007", createdAt: "2026-05-19", isActive: true, phoneNumber: "628123456782" },
+              { code: "USTADZ-03", namaGuru: "Ustadz Ahmad Fauzi, Lc.", assignedKelasId: "K025", createdAt: "2026-05-20", isActive: true, phoneNumber: "628123456783" }
+            ];
+
+            const existing = listGuru.find(g => g.email?.toLowerCase() === lowerEmail);
+            const savedCode = localStorage.getItem("PSD_CURRENT_GURU_CODE");
+
+            if (existing) {
+              setCurrentGuruCode(existing.code);
+              localStorage.setItem("PSD_CURRENT_GURU_CODE", existing.code);
+            } else if (savedCode && listGuru.some(g => g.code === savedCode)) {
+              setCurrentGuruCode(savedCode);
+              setGuruCodes(prev => prev.map(g => g.code === savedCode ? { ...g, email: lowerEmail } : g));
+            } else {
+              const generatedCode = "GURU-" + Math.floor(1000 + Math.random() * 9000);
+              const friendlyName = user.displayName || user.email.split("@")[0].replace(/[._-]/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+              const newGuru: GuruCode = {
+                code: generatedCode,
+                namaGuru: friendlyName,
+                assignedKelasId: "K001",
+                createdAt: new Date().toISOString().split("T")[0],
+                isActive: true,
+                phoneNumber: "",
+                email: lowerEmail
+              };
+              setGuruCodes(prev => {
+                if (prev.some(g => g.email?.toLowerCase() === lowerEmail)) return prev;
+                return [...prev, newGuru];
+              });
+              setCurrentGuruCode(generatedCode);
+              localStorage.setItem("PSD_CURRENT_GURU_CODE", generatedCode);
+            }
+          }
+        }
+
         setIsGSheetsSyncingOnLaunch(true);
         setGsLaunchSyncError(null);
         try {
@@ -2651,65 +2852,209 @@ export default function App() {
                 }}
               />
             ) : (userRole === "guru" && !activeGuruProfile) ? (
-              /* Verification Gateway Card */
-              <div className="max-w-md mx-auto my-12 bg-white/80 backdrop-blur-md rounded-3xl border border-white/65 p-8 shadow-md text-center space-y-6 animate-fadeIn">
-                <div className="w-16 h-16 bg-emerald-50 text-[#8BA888] rounded-2xl flex items-center justify-center mx-auto shadow-sm border border-emerald-100">
-                  <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                  </svg>
+              /* Verification Gateway Card with Email/Password & Auto-Sync Support */
+              <div className="max-w-md mx-auto my-12 bg-white/95 backdrop-blur-md rounded-3xl border border-slate-200/80 p-8 shadow-lg text-center space-y-6 animate-fadeIn transition-all">
+                <div className="mx-auto flex items-center justify-center gap-3">
+                  <div className="w-14 h-14 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center shadow-xs border border-emerald-100">
+                    <GraduationCap className="w-7 h-7" />
+                  </div>
+                  <div className="w-12 h-12 bg-slate-50 text-slate-500 rounded-2xl flex items-center justify-center shadow-xs border border-slate-150">
+                    <Lock className="w-5.5 h-5.5" />
+                  </div>
                 </div>
+                
                 <div className="space-y-2">
-                  <h2 className="text-xl font-display font-black text-slate-800">Verifikasi Kode Unik Guru</h2>
-                  <p className="text-xs text-slate-500 max-w-sm mx-auto leading-relaxed">
-                    SiswaDigital sekarang diamankan. Silakan masukkan Kode Akses unik Anda yang diberikan oleh Admin untuk dapat mengisi nilai dan mengelola kelas.
+                  <h2 className="text-2xl font-display font-black text-slate-800 tracking-tight">Gerbang Akses Pendidik</h2>
+                  <p className="text-xs text-slate-550 max-w-sm mx-auto leading-relaxed">
+                    Aman, andal, dan tersinkronisasi realtime ke Google Cloud &amp; Google Drive Anda.
                   </p>
                 </div>
 
-                <form onSubmit={(e) => {
-                  e.preventDefault();
-                  const codeVal = verificationInput.trim();
-                  if (codeVal === "B1smillah") {
-                    setIsAdminUnlocked(true);
-                    localStorage.setItem("PSD_ADMIN_UNLOCKED", "true");
-                    setUserRole("admin");
-                    setVerificationInput("");
-                    showToast("Portal admin berhasil dibuka!", "success");
-                    return;
-                  }
-
-                  const matched = guruCodes.find(g => g.code === codeVal && g.isActive);
-                  if (matched) {
-                    setCurrentGuruCode(matched.code);
-                    showToast(`Selamat datang, ${matched.namaGuru}!`, "success");
-                  } else {
-                    showToast("Kode akses tidak valid atau dinonaktifkan Admin.", "neutral");
-                  }
-                }} className="space-y-4">
-                  <div className="space-y-1.5 text-left">
-                    <label className="text-[10px] font-bold text-slate-550 uppercase tracking-wider block text-center">Kode Akses Unik Guru</label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="Masukkan Kode Guru (e.g. GURU-2026)"
-                      value={verificationInput}
-                      onChange={(e) => setVerificationInput(e.target.value)}
-                      className="w-full text-center px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-[#8BA888] text-sm font-mono font-bold tracking-widest text-slate-800 uppercase placeholder-slate-400"
-                    />
-                  </div>
-
+                {/* Tab Switcher for Methods */}
+                <div className="flex bg-slate-105 p-1 rounded-2xl gap-1">
                   <button
-                    type="submit"
-                    className="w-full py-3 rounded-2xl bg-[#2D3A3A] hover:bg-[#425555] text-white font-extrabold text-[11px] uppercase tracking-wider transition-colors cursor-pointer shadow-md shadow-slate-900/10"
+                    type="button"
+                    onClick={() => {
+                      setAuthMethod("email");
+                      setIsSignUp(false);
+                    }}
+                    className={`flex-1 py-2 rounded-xl text-xs font-black transition-all cursor-pointer ${
+                      authMethod === "email" 
+                        ? "bg-white text-slate-800 shadow-2xs" 
+                        : "text-slate-500 hover:text-slate-800"
+                    }`}
                   >
-                    Buka Akses Guru
+                    Masuk Akun (Email)
                   </button>
-                </form>
+                  <button
+                    type="button"
+                    onClick={() => setAuthMethod("code")}
+                    className={`flex-1 py-2 rounded-xl text-xs font-black transition-all cursor-pointer ${
+                      authMethod === "code" 
+                        ? "bg-white text-slate-800 shadow-2xs" 
+                        : "text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    Verifikasi Kode
+                  </button>
+                </div>
+
+                {/* CONTENT FOR TAB: EMAIL/PASSWORD AUTH */}
+                {authMethod === "email" && (
+                  <form onSubmit={handleEmailPasswordAuth} className="space-y-4 text-left animate-fadeIn">
+                    <div className="text-center mb-1">
+                      <span className="text-[10px] uppercase font-extrabold tracking-widest text-emerald-800 bg-emerald-50/70 border border-emerald-100 px-3 py-1 rounded-full">
+                        {isSignUp ? "Registrasi Akun Baru" : "Masuk dengan Email & Sandi"}
+                      </span>
+                    </div>
+
+                    {isSignUp && (
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-550 uppercase tracking-wider block">Nama Lengkap</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="Masukkan Nama Lengkap..."
+                          value={displayNameInput}
+                          onChange={(e) => setDisplayNameInput(e.target.value)}
+                          className="w-full px-4 py-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800"
+                        />
+                      </div>
+                    )}
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-550 uppercase tracking-wider block">Alamat Email</label>
+                      <input
+                        type="email"
+                        required
+                        placeholder="contoh: ustadz@alhanif.com"
+                        value={emailInput}
+                        onChange={(e) => setEmailInput(e.target.value)}
+                        className="w-full px-4 py-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 font-medium"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-550 uppercase tracking-wider block">Kata Sandi</label>
+                      <input
+                        type="password"
+                        required
+                        placeholder="Minimal 6 karakter..."
+                        value={passwordInput}
+                        onChange={(e) => setPasswordInput(e.target.value)}
+                        className="w-full px-4 py-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800"
+                      />
+                    </div>
+
+                    {/* Ask for Guru Code optional field so we map it immediately on registered accounts */}
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-center">
+                        <label className="text-[10px] font-bold text-slate-550 uppercase tracking-wider block">KONEKSI KODE GURU (OPSIONAL)</label>
+                        <span className="text-[9px] text-emerald-600 font-extrabold">e.g. USTADZ-01</span>
+                      </div>
+                      <input
+                        type="text"
+                        placeholder="Masukkan kode unik di sini..."
+                        value={verificationInput}
+                        onChange={(e) => setVerificationInput(e.target.value)}
+                        className="w-full px-4 py-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 placeholder-slate-400 font-mono text-center uppercase"
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={authLoading}
+                      className="w-full mt-2 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white font-black text-xs uppercase tracking-wider transition-all cursor-pointer shadow-md shadow-emerald-990/10 flex items-center justify-center gap-2"
+                    >
+                      {authLoading ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Memproses Akun...</span>
+                        </>
+                      ) : (
+                        <span>{isSignUp ? "Daftarkan Akun & Buka Portal" : "Masuk Pintu Akademik"}</span>
+                      )}
+                    </button>
+
+                    <div className="text-center pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsSignUp(!isSignUp)}
+                        className="text-[11px] text-emerald-600 hover:text-emerald-800 hover:underline font-extrabold"
+                      >
+                        {isSignUp 
+                          ? "Sudah memiliki akun? Masuk di sini" 
+                          : "Belum punya akun? Registrasi Akun Baru"}
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {/* CONTENT FOR TAB: LEGACY VERIFICATION CODE */}
+                {authMethod === "code" && (
+                  <form onSubmit={(e) => {
+                    e.preventDefault();
+                    const codeVal = verificationInput.trim();
+                    if (codeVal === "B1smillah") {
+                      setIsAdminUnlocked(true);
+                      localStorage.setItem("PSD_ADMIN_UNLOCKED", "true");
+                      setUserRole("admin");
+                      setVerificationInput("");
+                      showToast("Portal admin berhasil dibuka!", "success");
+                      return;
+                    }
+
+                    const matched = guruCodes.find(g => g.code === codeVal && g.isActive);
+                    if (matched) {
+                      setCurrentGuruCode(matched.code);
+                      localStorage.setItem("PSD_CURRENT_GURU_CODE", matched.code);
+                      showToast(`Selamat datang, ${matched.namaGuru}!`, "success");
+                    } else {
+                      showToast("Kode akses tidak valid atau dinonaktifkan Admin.", "neutral");
+                    }
+                  }} className="space-y-4 animate-fadeIn">
+                    <div className="space-y-1.5 text-left">
+                      <label className="text-[10px] font-bold text-slate-550 uppercase tracking-wider block text-center">Kode Akses Unik Guru / Admin</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="Masukkan Kode Guru (e.g. USTADZ-01)"
+                        value={verificationInput}
+                        onChange={(e) => setVerificationInput(e.target.value)}
+                        className="w-full text-center px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-[#8BA888] text-sm font-mono font-bold tracking-widest text-slate-800 uppercase placeholder-slate-400"
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      className="w-full py-3 rounded-2xl bg-[#2D3A3A] hover:bg-[#425555] text-white font-extrabold text-[11px] uppercase tracking-wider transition-colors cursor-pointer shadow-md shadow-slate-900/10"
+                    >
+                      Buka Akses Guru &amp; Admin
+                    </button>
+                  </form>
+                )}
+
+                {/* Back button to return to the root door selection page */}
+                <div className="pt-2 border-t border-slate-100 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUserRole(null);
+                      setWaliActiveSiswa(null);
+                      setActiveTab("dashboard");
+                    }}
+                    className="flex items-center gap-1.5 text-xs text-slate-450 hover:text-slate-750 transition-colors font-extrabold cursor-pointer hover:underline"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Kembali ke Gerbang Utama</span>
+                  </button>
+                </div>
 
                 {/* Helpful list box */}
-                <div className="bg-emerald-50/40 border border-[#8BA888]/20 rounded-2xl p-4.5 text-left space-y-3">
+                <div className="bg-emerald-50/40 border border-[#8BA888]/20 rounded-2xl p-4.5 text-left space-y-2">
                   <span className="text-[10px] font-black text-slate-700 uppercase tracking-wider block">ℹ️ Petunjuk Akses Pendidik &amp; Staf:</span>
-                  <p className="text-[10px] text-slate-500 leading-relaxed text-left">
-                    Yth. Bapak/Ibu Dewan Pendidik Al Hanif, demi keamanan data akademik, silakan masuk menggunakan <span className="font-bold text-slate-700">Kode Unik Pegawai / Pendidik</span> yang telah didistribusikan secara resmi oleh administrator kurikulum. Harap menjaga kerahasiaan kredensial Anda dari pihak luar.
+                  <p className="text-[10px] text-slate-500 leading-normal">
+                    Dewan Pendidik SDIT Al Hanif Cilegon, silakan masuk menggunakan akun email/password atau Kode Guru Anda. Alamat email yang terdaftar sebagai Administrator Utama Kurikulum (<span className="font-semibold text-slate-700">documenmondok003@gmail.com</span>) memiliki akses penuh ke seluruh pengaturan kurikulum Al-Hanif.
                   </p>
                 </div>
               </div>

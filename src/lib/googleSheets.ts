@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User } from "firebase/auth";
+import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User, signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
 import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
 import firebaseConfig from "../../firebase-applet-config.json";
 import { Kelas, MataPelajaran, Siswa, KategoriPenilaian, Penilaian, GuruCode, Jadwal, HariBelajar, Tugas, AbsenSiswa, AbsenGuru, Announcement, UjianPraktek, PengumpulanTugas, GuruPiket, TeacherAgenda } from "../types";
@@ -105,9 +105,9 @@ export const initAuth = (
         cachedAccessToken = activeToken;
         localStorage.setItem("PSD_GOOGLE_ACCESS_TOKEN", activeToken);
         if (onAuthSuccess) onAuthSuccess(user, activeToken);
-      } else if (!isSigningIn) {
-        cachedAccessToken = null;
-        if (onAuthFailure) onAuthFailure();
+      } else {
+        // Logged in with email & password, or token was deleted but user session is still fine
+        if (onAuthSuccess) onAuthSuccess(user, "");
       }
     } else {
       cachedAccessToken = null;
@@ -115,6 +115,31 @@ export const initAuth = (
       if (onAuthFailure) onAuthFailure();
     }
   });
+};
+
+// Sign in with Firebase Email & Password
+export const emailAndPasswordSignIn = async (email: string, password: string): Promise<User> => {
+  try {
+    const result = await signInWithEmailAndPassword(auth, email, password);
+    return result.user;
+  } catch (error: any) {
+    console.error("Email/Password Sign-In Error:", error);
+    throw error;
+  }
+};
+
+// Sign up/Register with Firebase Email & Password
+export const emailAndPasswordSignUp = async (email: string, password: string, displayName: string): Promise<User> => {
+  try {
+    const result = await createUserWithEmailAndPassword(auth, email, password);
+    if (displayName.trim()) {
+      await updateProfile(result.user, { displayName });
+    }
+    return result.user;
+  } catch (error: any) {
+    console.error("Email/Password Sign-Up Error:", error);
+    throw error;
+  }
 };
 
 // Complete Sign-In popup with Google Sheets scopes

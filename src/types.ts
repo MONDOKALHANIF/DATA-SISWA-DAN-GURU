@@ -60,6 +60,7 @@ export interface GuruCode {
   mapelAjar?: string;   // Lesson/subject taught (Mata pelajaran yang diajar)
   mapelAjars?: string[]; // Multiple assigned subjects support
   isWaliKelas?: boolean; // True if Wali Kelas, False if Guru Mapel
+  email?: string;        // Account email associated with this guru
 }
 
 export interface KegiatanEkstra {
